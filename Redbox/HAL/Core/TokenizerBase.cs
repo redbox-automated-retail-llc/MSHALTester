@@ -1,32 +1,30 @@
-using Redbox.HAL.Component.Model;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Text;
-
+using Redbox.HAL.Component.Model;
 
 namespace Redbox.HAL.Core
 {
     public abstract class TokenizerBase<T>
     {
-        protected readonly ITokenReader m_tokenReader;
-        private readonly ErrorList m_errors = new ErrorList();
-        private readonly IDictionary<T, TokenizerBase<T>.StateHandler> m_handlers = (IDictionary<T, TokenizerBase<T>.StateHandler>)new Dictionary<T, TokenizerBase<T>.StateHandler>();
-
         protected TokenizerBase(Stream tokenStream)
-          : this()
+            : this()
         {
-            this.m_tokenReader = (ITokenReader)new StreamTokenReader(tokenStream);
+            this.m_tokenReader = new StreamTokenReader(tokenStream);
         }
 
         protected TokenizerBase(int lineNumber, string statement)
-          : this()
+            : this()
         {
-            this.m_tokenReader = (ITokenReader)new StringTokenReader(lineNumber, statement);
+            this.m_tokenReader = new StringTokenReader(lineNumber, statement);
         }
 
-        protected TokenizerBase() => this.BuildStateHandlerDictionary();
+        protected TokenizerBase()
+        {
+            this.BuildStateHandlerDictionary();
+        }
 
         public void Tokenize()
         {
@@ -34,35 +32,53 @@ namespace Redbox.HAL.Core
             this.StartStateMachine();
         }
 
-        public ErrorList Errors => this.m_errors;
+        public ErrorList Errors
+        {
+            get
+            {
+                return this.m_errors;
+            }
+        }
 
         protected internal void StartStateMachine()
         {
             if (this.m_tokenReader.IsEmpty())
-                return;
-            do
             {
-                TokenizerBase<T>.StateHandler handler = this.m_handlers.ContainsKey(this.CurrentState) ? this.m_handlers[this.CurrentState] : (TokenizerBase<T>.StateHandler)null;
-                if (handler == null)
-                    throw new ArgumentException("No handler found where CurrentState = " + this.CurrentState?.ToString());
-                switch (handler())
+                return;
+            }
+            for (; ; )
+            {
+                TokenizerBase<T>.StateHandler stateHandler = (this.m_handlers.ContainsKey(this.CurrentState) ? this.m_handlers[this.CurrentState] : null);
+                if (stateHandler == null)
                 {
-                    case StateResult.Continue:
-                        continue;
-                    case StateResult.Terminal:
-                        this.StopMachine();
-                        return;
-                    default:
-                        continue;
+                    break;
+                }
+                StateResult stateResult = stateHandler();
+                if (stateResult != StateResult.Continue)
+                {
+                    if (stateResult == StateResult.Terminal)
+                    {
+                        goto Block_6;
+                    }
+                }
+                else if (!this.MoveToNextToken())
+                {
+                    goto Block_7;
                 }
             }
-            while (this.MoveToNextToken());
+            string text = "No handler found where CurrentState = ";
+            T currentState = this.CurrentState;
+            throw new ArgumentException(text + ((currentState != null) ? currentState.ToString() : null));
+        Block_6:
+            this.StopMachine();
+            return;
+        Block_7:
             this.StopMachine();
         }
 
         protected internal string FormatError(string message)
         {
-            return string.Format("(Line: {0} Column: {1}) {2}", (object)this.m_tokenReader.Row, (object)this.m_tokenReader.Column, (object)message);
+            return string.Format("(Line: {0} Column: {1}) {2}", this.m_tokenReader.Row, this.m_tokenReader.Column, message);
         }
 
         protected internal void Reset()
@@ -73,24 +89,42 @@ namespace Redbox.HAL.Core
             this.OnReset();
         }
 
-        protected internal bool MoveToNextToken() => this.m_tokenReader.MoveToNextToken();
+        protected internal bool MoveToNextToken()
+        {
+            return this.m_tokenReader.MoveToNextToken();
+        }
 
-        protected internal char? PeekNextToken() => this.m_tokenReader.PeekNextToken();
+        protected internal char? PeekNextToken()
+        {
+            return this.m_tokenReader.PeekNextToken();
+        }
 
-        protected internal char? PeekNextToken(int i) => this.m_tokenReader.PeekNextToken(i);
+        protected internal char? PeekNextToken(int i)
+        {
+            return this.m_tokenReader.PeekNextToken(i);
+        }
 
-        protected internal char GetCurrentToken() => this.m_tokenReader.GetCurrentToken();
+        protected internal char GetCurrentToken()
+        {
+            return this.m_tokenReader.GetCurrentToken();
+        }
 
-        protected internal void ResetAccumulator() => this.Accumulator = new StringBuilder();
+        protected internal void ResetAccumulator()
+        {
+            this.Accumulator = new StringBuilder();
+        }
 
         protected internal void AppendToAccumulator()
         {
             this.Accumulator.Append(this.GetCurrentToken());
         }
 
-        protected internal string GetAccumulatedToken() => this.Accumulator.ToString();
+        protected internal string GetAccumulatedToken()
+        {
+            return this.Accumulator.ToString();
+        }
 
-        protected internal StringBuilder Accumulator { get; private set; }
+        protected internal StringBuilder Accumulator { get; set; }
 
         protected internal T CurrentState { get; set; }
 
@@ -102,23 +136,33 @@ namespace Redbox.HAL.Core
         {
         }
 
-        private void BuildStateHandlerDictionary()
+        void BuildStateHandlerDictionary()
         {
             this.m_handlers.Clear();
-            foreach (MethodInfo method in this.GetType().GetMethods(BindingFlags.Instance | BindingFlags.NonPublic))
+            foreach (MethodInfo methodInfo in base.GetType().GetMethods(BindingFlags.Instance | BindingFlags.NonPublic))
             {
-                StateHandlerAttribute customAttribute = (StateHandlerAttribute)Attribute.GetCustomAttribute((MemberInfo)method, typeof(StateHandlerAttribute));
-                if (customAttribute != null)
-                    this.m_handlers[(T)customAttribute.State] = (TokenizerBase<T>.StateHandler)Delegate.CreateDelegate(typeof(TokenizerBase<T>.StateHandler), (object)this, method.Name);
+                StateHandlerAttribute stateHandlerAttribute = (StateHandlerAttribute)Attribute.GetCustomAttribute(methodInfo, typeof(StateHandlerAttribute));
+                if (stateHandlerAttribute != null)
+                {
+                    this.m_handlers[(T)((object)stateHandlerAttribute.State)] = (TokenizerBase<T>.StateHandler)Delegate.CreateDelegate(typeof(TokenizerBase<T>.StateHandler), this, methodInfo.Name);
+                }
             }
         }
 
-        private void StopMachine()
+        void StopMachine()
         {
             this.OnEndOfStream();
             if (this.Accumulator.Length > 0)
-                throw new Exception(string.Format("State Machine Terminated with [{0}] left in the buffer.", (object)this.Accumulator));
+            {
+                throw new Exception(string.Format("State Machine Terminated with [{0}] left in the buffer.", this.Accumulator));
+            }
         }
+
+        protected readonly ITokenReader m_tokenReader;
+
+        readonly ErrorList m_errors = new ErrorList();
+
+        readonly IDictionary<T, TokenizerBase<T>.StateHandler> m_handlers = new Dictionary<T, TokenizerBase<T>.StateHandler>();
 
         internal delegate StateResult StateHandler();
     }
